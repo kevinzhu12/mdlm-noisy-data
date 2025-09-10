@@ -798,14 +798,14 @@ class Diffusion(L.LightningModule):
     return edge
 
   def _sample_t(self, n, device):
-    _eps_t = torch.rand(n, device=device)
-    if self.antithetic_sampling:
-      offset = torch.arange(n, device=device) / n
-      _eps_t = (_eps_t / n + offset) % 1
-    t = (1 - self.sampling_eps) * _eps_t + self.sampling_eps
-    if self.importance_sampling:
-      return self.noise.importance_sampling_transformation(t)
-    return t
+      _eps_t = torch.rand(n, device=device)
+      if self.antithetic_sampling:
+        offset = torch.arange(n, device=device) / n
+        _eps_t = (_eps_t / n + offset) % 1
+      t = (1 - self.sampling_eps) * _eps_t + self.sampling_eps
+      if self.importance_sampling:
+        return self.noise.importance_sampling_transformation(t)
+      return t
 
   def _maybe_sub_sample(self, x0, attention_mask):
     seqlen = x0.shape[1]

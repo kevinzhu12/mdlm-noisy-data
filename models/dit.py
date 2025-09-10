@@ -357,14 +357,26 @@ class DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
       return  bias_dropout_add_scale_fused_inference
 
   def forward(self, indices, sigma):
-    x = self.vocab_embed(indices)
-    c = F.silu(self.sigma_map(sigma))
-
-    rotary_cos_sin = self.rotary_emb(x)
-
+    # INPUT TENSORS:
+    indices = indices  # [16, 1024]    - masked token IDs
+    sigma = sigma      # [16, 1]       - noise levels
+    
+    # STEP 1: Token embeddings
+    x = self.vocab_embed(indices)  # [16, 1024, 768] - dense token representations
+    
+    # STEP 2: Noise conditioning  
+    c = F.silu(self.sigma_map(sigma))  # [16, 128] - noise conditioning vector
+    
+    # STEP 3: Positional embeddings
+    rotary_cos_sin = self.rotary_emb(x)  # [16, 1024, 768] - rotary position info
+    
+    # STEP 4: Transformer processing
     with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-      for i in range(len(self.blocks)):
-        x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
-      x = self.output_layer(x, c)
-
-    return x
+        for i in range(12):  # 12 transformer blocks
+            x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)  # [16, 1024, 768]
+            # Each block uses c for adaptive layer normalization
+        
+        # STEP 5: Final prediction layer
+        x = self.output_layer(x, c)  # [16, 1024, 50258] - logits for each token position
+    
+    return x  # [16, 1024, 50258] - probability distributions over vocabulary
