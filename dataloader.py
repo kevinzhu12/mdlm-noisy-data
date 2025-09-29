@@ -15,6 +15,7 @@ import requests
 import tokenizers
 import torch
 import transformers
+import random
 
 import utils
 
@@ -102,6 +103,70 @@ def scientific_papers_detokenizer(x):
   x = lm1b_detokenizer(x)
   return x
 
+
+# added by kevin: sequence masking function
+def apply_sequence_masking(dataset, tokenizer, clean_ratio=0.2, token_keep_prob=0.5, seed=None):
+  """
+  Apply masking to a dataset for training discrete diffusion models without clean data.
+
+  Args:
+    dataset: HuggingFace dataset with 'input_ids' column containing tokenized sequences (shape: [B, sequence_length])
+    tokenizer: Tokenizer with mask_token attribute
+    clean_ratio: Fraction of sequences to keep clean (default: 0.2 for 20% clean)
+    token_keep_prob: Probability of keeping each token unmasked in masked sequences (default: 0.5)
+    seed: Random seed for reproducibility (optional)
+
+  Returns:
+    Modified dataset with masking applied
+  """
+
+  if seed is not None:
+    random.seed(seed)
+
+  if hasattr(tokenizer, 'mask_token_id') and tokenizer.mask_token_id is not None:
+    mask_token_id = tokenizer.mask_token_id
+  else:
+    mask_token_id = tokenizer.encode(tokenizer.mask_token)[0]
+  
+  def mask_sequence(example):
+    input_ids = example['input_ids']
+
+    if isinstance(input_ids[0], list):
+      masked_input_ids = []
+      for seq in input_ids:
+        if random.random() < clean_ratio:
+          masked_input_ids.append(seq)
+        else:
+          masked_seq = []
+          for token_id in seq:
+            if token_id == tokenizer.bos_token_id or token_id == tokenizer.eos_token_id or token_id == tokenizer.pad_token_id:
+              masked_seq.append(token_id)
+            else:
+              if random.random() < token_keep_prob:
+                masked_seq.append(token_id)
+              else:
+                masked_seq.append(mask_token_id)
+          masked_input_ids.append(masked_seq)
+      example['input_ids'] = masked_input_ids
+    else:
+      if random.random() < clean_ratio:
+        pass
+      else:
+        masked_seq = []
+        for token_id in input_ids:
+          if token_id == tokenizer.bos_token_id or token_id == tokenizer.eos_token_id or token_id == tokenizer.pad_token_id:
+            masked_seq.append(token_id)
+          else:
+            if random.random() < token_keep_prob:
+              masked_seq.append(token_id)
+            else:
+              masked_seq.append(mask_token_id)
+        example['input_ids'] = masked_seq
+    
+    return example
+  
+  masked_dataset = dataset.map(mask_sequence, batched=True, desc='Applying sequence masking')
+  return masked_dataset
 
 class Text8Tokenizer(transformers.PreTrainedTokenizer):
   def __init__(
@@ -302,7 +367,8 @@ def _group_texts(examples, block_size, bos, eos):
 
 def get_dataset(
     dataset_name, tokenizer, wrap, mode, cache_dir,
-    block_size=1024, num_proc=len(os.sched_getaffinity(0)), streaming=False):
+    block_size=1024, num_proc=len(os.sched_getaffinity(0)), streaming=False,
+    apply_masking=False, clean_ratio=0.2, token_keep_prob=0.5, masking_seed=None):
   if wrap:
     filename = f'{dataset_name}_{mode}_bs{block_size}_wrapped.dat'
   else:
@@ -463,6 +529,9 @@ def get_dataset(
       'text')
 
   if not wrap:
+    if apply_masking:
+      tokenized_dataset = apply_sequence_masking(
+        tokenized_dataset, tokenizer, clean_ratio, token_keep_prob, masking_seed)
     tokenized_dataset.save_to_disk(_path)
     return tokenized_dataset.with_format('torch')
 
@@ -480,6 +549,12 @@ def get_dataset(
       num_proc=num_proc,
       load_from_cache_file=True,
       desc='Grouping')
+  
+  if apply_masking:
+    chunked_dataset = apply_sequence_masking(
+      chunked_dataset, tokenizer, clean_ratio, token_keep_prob, masking_seed)
+  
+  if not streaming:
     chunked_dataset.save_to_disk(_path)
   chunked_dataset = chunked_dataset.with_format('torch')
   return chunked_dataset
@@ -523,7 +598,8 @@ def get_tokenizer(config):
     
 
 def get_dataloaders(config, tokenizer, skip_train=False,
-                    skip_valid=False, valid_seed=None):
+                    skip_valid=False, valid_seed=None,):
+
   num_gpus = torch.cuda.device_count()
   assert (config.loader.global_batch_size
           == (config.loader.batch_size
@@ -549,7 +625,11 @@ def get_dataloaders(config, tokenizer, skip_train=False,
       mode='train',
       wrap=config.data.wrap,
       cache_dir=config.data.cache_dir,
-      block_size=config.model.length)
+      block_size=config.model.length,
+      apply_masking=config.premasked_training.apply_masking,
+      clean_ratio=config.premasked_training.clean_ratio,
+      token_keep_prob=config.premasked_training.token_keep_prob,
+      masking_seed=config.premasked_training.masking_seed)
   
   if config.data.valid in ['text8', 'lm1b', 'ag_news']:
     validation_split = 'test'
@@ -565,7 +645,11 @@ def get_dataloaders(config, tokenizer, skip_train=False,
       mode=validation_split,
       cache_dir=config.data.cache_dir,
       block_size=config.model.length,
-      streaming=False)
+      streaming=False,
+      apply_masking=config.premasked_training.apply_masking,
+      clean_ratio=config.premasked_training.clean_ratio,
+      token_keep_prob=config.premasked_training.token_keep_prob,
+      masking_seed=config.premasked_training.masking_seed)
 
   if skip_train:
     train_loader = None

@@ -141,7 +141,8 @@ def _ppl_eval(config, logger, tokenizer):
     strategy=hydra.utils.instantiate(config.strategy),
     logger=wandb_logger)
   _, valid_ds = dataloader.get_dataloaders(
-    config, tokenizer, skip_train=True, valid_seed=config.seed)
+    config, tokenizer, skip_train=True, valid_seed=config.seed,
+)
   trainer.validate(model, valid_ds)
 
 

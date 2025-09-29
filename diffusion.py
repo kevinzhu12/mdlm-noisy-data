@@ -152,6 +152,75 @@ class Diffusion(L.LightningModule):
     self.fast_forward_batches = None
     self._validate_configuration()
 
+    # added by kevin: premasking parameters
+    self.token_keep_prob = self.config.premasked_training.token_keep_prob
+
+    self.diffusion_time = self._compute_diffusion_time_from_masking_prob(self.token_keep_prob)
+
+
+  def _compute_diffusion_time_from_masking_prob(self, token_keep_prob):
+    """
+    Find diffusion time t where corruption probability = 1 - token_keep_prob
+    
+    For loglinear noise: move_chance = 1 - exp(-sigma(t))
+    So: corruption_prob = 1 - exp(-sigma(t))
+    And: sigma(t) = -log(1 - t * (1 - eps)) for loglinear
+    """
+    corruption_prob = 1.0 - token_keep_prob  # If keep_prob=0.5, corruption_prob=0.5
+    
+    # For loglinear: corruption_prob = 1 - exp(-sigma(t))
+    # So: sigma(t) = -log(1 - corruption_prob)
+    target_sigma = -math.log(1 - corruption_prob)
+    
+    # For loglinear noise: sigma(t) = -log(1 - t * (1 - eps))
+    # So: target_sigma = -log(1 - t * (1 - eps))
+    # Solving for t: t = (1 - exp(-target_sigma)) / (1 - eps)
+    eps = self.noise.eps if hasattr(self.noise, 'eps') else 1e-3
+    t = (1 - math.exp(-target_sigma)) / (1 - eps)
+    
+    t = max(0.0, min(1.0, t))  # Clip to [0, 1]
+    return t
+
+  def _get_known_token_mask(self, x):
+    """
+    Getting the known token mask based on the masking probabilities
+    """
+    known_token_mask = (x != self.mask_index)
+    return known_token_mask
+
+  def _sample_t_constrained(self, batch_size, device, known_token_mask):
+    """
+    Sample diffusion time t constrained by the known token mask
+
+    Args:
+      batch_size: int, batch size
+      device: torch.device, device
+      known_token_mask: torch.Tensor, known token mask
+
+    Returns:
+      t: torch.Tensor, diffusion time
+    """
+    has_masked_tokens = ~known_token_mask.all(dim=-1) # shape (batch_size,)
+
+    t = torch.rand(batch_size, device=device) # shape (batch_size,)
+
+    if self.antithetic_sampling:
+      offset = torch.arange(batch_size, device=device) / batch_size
+      t = (t / batch_size + offset) % 1
+    
+    # remap t from [0, 1] to [min_t, 1] for masked sequences
+    if has_masked_tokens.any():
+      min_t = self.diffusion_time
+      constrained_range = 1.0 - min_t
+      t[has_masked_tokens] = min_t + constrained_range * t[has_masked_tokens]
+
+    t = (1 - self.sampling_eps) * t + self.sampling_eps
+
+    if self.importance_sampling:
+      t = self.noise.importance_sampling_transformation(t)
+
+    return t
+  
   def _validate_configuration(self):
     assert not (self.change_of_variables
                 and self.importance_sampling)
@@ -844,8 +913,21 @@ class Diffusion(L.LightningModule):
                           dim=-1,
                           index=x0[:, :, None]).squeeze(-1)
 
-  def _forward_pass_diffusion(self, x0):
-    t = self._sample_t(x0.shape[0], x0.device)
+  def _forward_pass_diffusion(self, x0, known_token_mask=None):
+    """
+    Forward pass for the diffusion model.
+    Args:
+      x0: int torch.Tensor with shape (batch_size, seq_len), input.
+      known_token_mask: float torch.Tensor with shape (batch_size, seq_len), known token mask.
+    Returns:
+      loss: float torch.Tensor with shape (batch_size, seq_len), loss.
+    """   
+
+    if known_token_mask is not None:
+      t = self._sample_t_constrained(x0.shape[0], x0.device, known_token_mask) # shape (batch_size, 1) - diffusion time for each sequence
+    else:
+      t = self._sample_t(x0.shape[0], x0.device) # shape (batch_size, 1) - diffusion time for each sequence
+    
     if self.T > 0:
       t = (t * self.T).to(torch.int)
       t = t / self.T
@@ -882,38 +964,47 @@ class Diffusion(L.LightningModule):
     
     # SUBS parameterization, continuous time.
     log_p_theta = torch.gather(
-      input=model_output,
+      input=model_output, # (batch_size, seq_len, vocab_size) - model
       dim=-1,
       index=x0[:, :, None]).squeeze(-1)
     
     if self.change_of_variables or self.importance_sampling:
-      return log_p_theta * torch.log1p(
-        - torch.exp(- self.noise.sigma_min))
+      loss_per_token = log_p_theta * torch.log1p(- torch.exp(- self.noise.sigma_min))
+    else:
+      loss_per_token = - log_p_theta * (dsigma / torch.expm1(sigma))[:, None]
+
+    if known_token_mask is not None:
+      loss_per_token = loss_per_token * known_token_mask
     
-    return - log_p_theta * (
-      dsigma / torch.expm1(sigma))[:, None]
+    return loss_per_token # shape (batch_size, seq_len)
 
   def _loss(self, x0, attention_mask):
     (input_tokens, output_tokens,
      attention_mask) = self._maybe_sub_sample(
-       x0, attention_mask)
+       x0, attention_mask) # shape (batch_size, seq_len)
 
+    known_token_mask = self._get_known_token_mask(input_tokens) # shape (batch_size, seq_len)
     if self.parameterization == 'ar':
       logprobs = self.backbone(input_tokens, None)
       loss = - logprobs.gather(
         -1, output_tokens[:, :, None])[:, :, 0]
     else:
-      loss = self._forward_pass_diffusion(input_tokens)
-    
-    nlls = loss * attention_mask
-    count = attention_mask.sum()
+      loss = self._forward_pass_diffusion(input_tokens, known_token_mask) # shape (batch_size, seq_len)
+
+    if known_token_mask is not None:
+      effective_mask = attention_mask * known_token_mask.float()
+    else:
+      effective_mask = attention_mask
+
+    nlls = loss * effective_mask
+    count = effective_mask.sum()
 
     batch_nll = nlls.sum()
     token_nll = batch_nll / count
 
     return Loss(loss=token_nll,
                 nlls=nlls,
-                token_mask=attention_mask)
+                token_mask=effective_mask)
 
   def _score_entropy(self, log_score, sigma, xt, x0):
     """Computes the SEDD loss.

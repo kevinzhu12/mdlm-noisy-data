@@ -23,7 +23,8 @@ loader:
   # Note: batch_size and eval_batch_size are **per machine**
   batch_size: ${div_up:${.global_batch_size}, ${eval:${trainer.devices} * ${trainer.num_nodes}}}
   eval_batch_size: ${div_up:${.eval_global_batch_size}, ${eval:${trainer.devices} * ${trainer.num_nodes}}}
-  num_workers: ${eval:"len(__import__('os').sched_getaffinity(0))"}
+  # num_workers: ${eval:"len(__import__('os').sched_getaffinity(0))"}
+  num_workers: 48
   pin_memory: True
 
 sampling:
@@ -80,7 +81,7 @@ wandb:
   notes: Mulan for text
   group: null
   job_type: null
-  name: null
+  name: ${backbone}_${model.name}_${noise.type}_s${seed}_${now:%Y%m%d_%H%M%S}
   id: ${.name}_${seed}
   tags:
     - ${noise.type}
@@ -99,3 +100,9 @@ checkpointing:
   # Note: `checkpoints` path should correspond to `checkpoint_every_n_steps.dirpath`
   resume_from_ckpt: true
   resume_ckpt_path: ${.save_dir}/checkpoints/last.ckpt
+
+premasked_training:
+  apply_masking: False
+  clean_ratio: 0.2
+  token_keep_prob: 0.3
+  masking_seed: 42
