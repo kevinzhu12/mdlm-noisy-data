@@ -81,6 +81,7 @@ wandb:
   notes: Mulan for text
   group: null
   job_type: null
+  # NOTE: name includes token keep probability even when premasked_training.apply_masking is False
   name: ${backbone}_${model.name}_${noise.type}_s${seed}_tkp${premasked_training.token_keep_prob}_${now:%Y%m%d_%H%M%S}
   id: ${.name}_${seed}
   tags:
