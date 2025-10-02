@@ -105,7 +105,7 @@ def scientific_papers_detokenizer(x):
 
 
 # added by kevin: sequence masking function
-def apply_sequence_masking(dataset, tokenizer, clean_ratio=0.2, token_keep_prob=0.5, seed=None):
+def apply_sequence_masking(dataset, tokenizer, clean_ratio=0.2, masking_prob=0.5, seed=None):
   """
   Apply masking to a dataset for training discrete diffusion models without clean data.
 
@@ -113,7 +113,7 @@ def apply_sequence_masking(dataset, tokenizer, clean_ratio=0.2, token_keep_prob=
     dataset: HuggingFace dataset with 'input_ids' column containing tokenized sequences (shape: [B, sequence_length])
     tokenizer: Tokenizer with mask_token attribute
     clean_ratio: Fraction of sequences to keep clean (default: 0.2 for 20% clean)
-    token_keep_prob: Probability of keeping each token unmasked in masked sequences (default: 0.5)
+    masking_prob: Probability of masking each token in masked sequences (default: 0.5)
     seed: Random seed for reproducibility (optional)
 
   Returns:
@@ -122,6 +122,8 @@ def apply_sequence_masking(dataset, tokenizer, clean_ratio=0.2, token_keep_prob=
 
   if seed is not None:
     random.seed(seed)
+
+  token_keep_prob = 1 - masking_prob
 
   if hasattr(tokenizer, 'mask_token_id') and tokenizer.mask_token_id is not None:
     mask_token_id = tokenizer.mask_token_id
@@ -368,7 +370,7 @@ def _group_texts(examples, block_size, bos, eos):
 def get_dataset(
     dataset_name, tokenizer, wrap, mode, cache_dir,
     block_size=1024, num_proc=len(os.sched_getaffinity(0)), streaming=False,
-    apply_masking=False, clean_ratio=0.2, token_keep_prob=0.5, masking_seed=None):
+    apply_masking=False, clean_ratio=0.2, masking_prob=0.5, masking_seed=None):
   if wrap:
     filename = f'{dataset_name}_{mode}_bs{block_size}_wrapped.dat'
   else:
@@ -531,7 +533,7 @@ def get_dataset(
   if not wrap:
     if apply_masking:
       tokenized_dataset = apply_sequence_masking(
-        tokenized_dataset, tokenizer, clean_ratio, token_keep_prob, masking_seed)
+        tokenized_dataset, tokenizer, clean_ratio, masking_prob, masking_seed)
     tokenized_dataset.save_to_disk(_path)
     return tokenized_dataset.with_format('torch')
 
@@ -552,7 +554,7 @@ def get_dataset(
   
   if apply_masking:
     chunked_dataset = apply_sequence_masking(
-      chunked_dataset, tokenizer, clean_ratio, token_keep_prob, masking_seed)
+      chunked_dataset, tokenizer, clean_ratio, masking_prob, masking_seed)
   
   if not streaming:
     chunked_dataset.save_to_disk(_path)
@@ -628,7 +630,7 @@ def get_dataloaders(config, tokenizer, skip_train=False,
       block_size=config.model.length,
       apply_masking=config.premasked_training.apply_masking,
       clean_ratio=config.premasked_training.clean_ratio,
-      token_keep_prob=config.premasked_training.token_keep_prob,
+      masking_prob=config.premasked_training.masking_prob,
       masking_seed=config.premasked_training.masking_seed)
   
   if config.data.valid in ['text8', 'lm1b', 'ag_news']:
@@ -648,7 +650,7 @@ def get_dataloaders(config, tokenizer, skip_train=False,
       streaming=False,
       apply_masking=config.premasked_training.apply_masking,
       clean_ratio=config.premasked_training.clean_ratio,
-      token_keep_prob=config.premasked_training.token_keep_prob,
+      masking_prob=config.premasked_training.masking_prob,
       masking_seed=config.premasked_training.masking_seed)
 
   if skip_train:

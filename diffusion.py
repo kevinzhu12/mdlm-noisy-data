@@ -153,24 +153,23 @@ class Diffusion(L.LightningModule):
     self._validate_configuration()
 
     # added by kevin: premasking parameters
-    self.token_keep_prob = self.config.premasked_training.token_keep_prob
+    self.masking_prob = self.config.premasked_training.masking_prob
 
-    self.diffusion_time = self._compute_diffusion_time_from_masking_prob(self.token_keep_prob)
+    self.diffusion_time = self._compute_diffusion_time_from_masking_prob(self.masking_prob)
 
 
-  def _compute_diffusion_time_from_masking_prob(self, token_keep_prob):
+  def _compute_diffusion_time_from_masking_prob(self, masking_prob):
     """
-    Find diffusion time t where corruption probability = 1 - token_keep_prob
+    Find diffusion time t where corruption probability = masking_prob
     
     For loglinear noise: move_chance = 1 - exp(-sigma(t))
-    So: corruption_prob = 1 - exp(-sigma(t))
+    So: masking_prob = 1 - exp(-sigma(t))
     And: sigma(t) = -log(1 - t * (1 - eps)) for loglinear
-    """
-    corruption_prob = 1.0 - token_keep_prob  # If keep_prob=0.5, corruption_prob=0.5
+    """ 
     
-    # For loglinear: corruption_prob = 1 - exp(-sigma(t))
-    # So: sigma(t) = -log(1 - corruption_prob)
-    target_sigma = -math.log(1 - corruption_prob)
+    # For loglinear: masking_prob = 1 - exp(-sigma(t))
+    # So: sigma(t) = -log(1 - masking_prob)
+    target_sigma = -math.log(1 - masking_prob)
     
     # For loglinear noise: sigma(t) = -log(1 - t * (1 - eps))
     # So: target_sigma = -log(1 - t * (1 - eps))
@@ -659,24 +658,36 @@ class Diffusion(L.LightningModule):
       * batch_dims, dtype=torch.int64)
 
   def _ddpm_caching_update(self, x, t, dt, p_x0=None):
+    """
+    DDPM caching update.
+    Args:
+      x: int torch.Tensor with shape (batch_size, seq_len), input.
+      t: float torch.Tensor with shape (batch_size, 1), time.
+      dt: float, time step. shape (batch_size, 1)
+      p_x0: float torch.Tensor with shape (batch_size, seq_len, vocab_size), logits of the model.
+    Returns:
+      p_x0: float torch.Tensor with shape (batch_size, seq_len, vocab_size), logits of the model.
+      _x: int torch.Tensor with shape (batch_size, seq_len), output. 
+    """
     assert self.config.noise.type == 'loglinear'
     sigma_t, _ = self.noise(t)
     if t.ndim > 1:
       t = t.squeeze(-1)
-    assert t.ndim == 1
-    move_chance_t = t[:, None, None]
-    move_chance_s = (t - dt)[:, None, None]
+    assert t.ndim == 1 # shape (batch_size, 1)
+    move_chance_t = t[:, None, None] # broadcasts t (batch_size, 1) to (batch_size, 1, 1)
+    move_chance_s = (t - dt)[:, None, None] 
     assert move_chance_t.ndim == 3, move_chance_t.shape
     if p_x0 is None:
-      p_x0 = self.forward(x, sigma_t).exp()
+      p_x0 = self.forward(x, sigma_t).exp() # shape (batch_size, seq_len, vocab_size) - logits of the model
     
     assert move_chance_t.ndim == p_x0.ndim
     q_xs = p_x0 * (move_chance_t - move_chance_s)
     q_xs[:, :, self.mask_index] = move_chance_s[:, :, 0]
-    _x = _sample_categorical(q_xs)
+    _x = _sample_categorical(q_xs) # shape (batch_size, seq_len) - output
     
     copy_flag = (x != self.mask_index).to(x.dtype)
     return p_x0, copy_flag * x + (1 - copy_flag) * _x
+    # return p_x0, _x # no monotonicity constraint on the output (unmasked tokens can change)
 
   def _ddpm_update(self, x, t, dt):
     sigma_t, _ = self.noise(t)
@@ -732,17 +743,14 @@ class Diffusion(L.LightningModule):
     # Lightning auto-casting is not working in this method for some reason
     if num_steps is None:
       num_steps = self.config.sampling.steps
-    x = self._sample_prior(
-      batch_size_per_gpu,
-      self.config.model.length).to(self.device)
-    timesteps = torch.linspace(
-      1, eps, num_steps + 1, device=self.device)
+    x = self._sample_prior(batch_size_per_gpu, self.config.model.length).to(self.device) # shape (batch_size, seq_len) - initial samples, they are all masked
+    timesteps = torch.linspace(1, eps, num_steps + 1, device=self.device) # shape (num_steps + 1, 1) - diffusion time for each step
     dt = (1 - eps) / num_steps
     p_x0_cache = None
 
+    print(f"Step 0/{num_steps}: {self.tokenizer.batch_decode(x)}")
     for i in range(num_steps):
-      t = timesteps[i] * torch.ones(
-        x.shape[0], 1, device=self.device)
+      t = timesteps[i] * torch.ones(x.shape[0], 1, device=self.device)
       if self.sampler == 'ddpm':
         x = self._ddpm_update(x, t, dt)
       elif self.sampler == 'ddpm_cache':
@@ -755,6 +763,12 @@ class Diffusion(L.LightningModule):
         x = x_next
       else:
         x = self._analytic_update(x, t, dt)
+
+      if (i + 1) % 50 == 0:
+        mask_count = (x == self.mask_index).sum().item()
+        print(f"Step {i + 1}/{num_steps}: {mask_count} masks remaining")
+        print(f"Step {i + 1}/{num_steps}: {self.tokenizer.batch_decode(x)}")
+        print()
 
     if self.config.sampling.noise_removal:
       t = timesteps[-1] * torch.ones(x.shape[0], 1,
@@ -969,7 +983,7 @@ class Diffusion(L.LightningModule):
       index=x0[:, :, None]).squeeze(-1)
     
     if self.change_of_variables or self.importance_sampling:
-      loss_per_token = log_p_theta * torch.log1p(- torch.exp(- self.noise.sigma_min))
+      loss_per_token = log_p_theta * torch.log1p(- torch.exp(- self.noise.sigma_min)) # shape
     else:
       loss_per_token = - log_p_theta * (dsigma / torch.expm1(sigma))[:, None]
 
@@ -990,6 +1004,8 @@ class Diffusion(L.LightningModule):
         -1, output_tokens[:, :, None])[:, :, 0]
     else:
       loss = self._forward_pass_diffusion(input_tokens, known_token_mask) # shape (batch_size, seq_len)
+
+    # cross entropy target: [mask], prediction: hello
 
     if known_token_mask is not None:
       effective_mask = attention_mask * known_token_mask.float()
@@ -1062,6 +1078,7 @@ class Diffusion(L.LightningModule):
         self.config.model.length).to(self.device)
       if target is not None:
         x[:, : -stride_length] = target
+      
       for i in range(num_steps + 1):
         p_x0_cache, x_next = self._ddpm_caching_update(
           x=x, t=(1 - i * dt) * ones, dt=dt, p_x0=p_x0_cache)
