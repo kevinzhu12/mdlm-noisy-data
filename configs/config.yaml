@@ -83,7 +83,7 @@ wandb:
   job_type: null
   # NOTE: name includes token keep probability even when premasked_training.apply_masking is False
   name: s${seed}_cr${premasked_training.clean_ratio}_mp${premasked_training.masking_prob}_${now:%Y%m%d_%H%M%S}
-  id: ${.name}_${seed}
+  id: s${seed}_cr${premasked_training.clean_ratio}_mp${premasked_training.masking_prob}_${now:%Y%m%d_%H%M%S}
   tags:
     - ${noise.type}
     - ${data.train}

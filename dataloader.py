@@ -372,9 +372,17 @@ def get_dataset(
     block_size=1024, num_proc=len(os.sched_getaffinity(0)), streaming=False,
     apply_masking=False, clean_ratio=0.2, masking_prob=0.5, masking_seed=None):
   if wrap:
-    filename = f'{dataset_name}_{mode}_bs{block_size}_wrapped.dat'
+    filename = f'{dataset_name}_{mode}_bs{block_size}_wrapped'
   else:
-    filename = f'{dataset_name}_{mode}_bs{block_size}_unwrapped.dat'
+    filename = f'{dataset_name}_{mode}_bs{block_size}_unwrapped'
+
+  if apply_masking:
+    filename += f'_masked_cr{clean_ratio}_mp{masking_prob}'
+    if masking_seed is not None:
+      filename += f'_seed{masking_seed}'
+
+  filename += '.dat'
+
   _path = os.path.join(cache_dir, filename)
   
   if utils.fsspec_exists(_path):
@@ -596,9 +604,13 @@ def get_tokenizer(config):
   if tokenizer.pad_token is None:
     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 
+  if tokenizer.mask_token is None:
+    tokenizer.add_special_tokens({'mask_token': '[MASK]'})
+    print(f"Added mask token. vocab_size={tokenizer.vocab_size}, mask_token_id={tokenizer.mask_token_id}")
+
   return tokenizer
     
-
+ 
 def get_dataloaders(config, tokenizer, skip_train=False,
                     skip_valid=False, valid_seed=None,):
 

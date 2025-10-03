@@ -88,6 +88,8 @@ class Diffusion(L.LightningModule):
       self.vocab_size += 1
     else:
       self.mask_index = self.tokenizer.mask_token_id
+      self.vocab_size = max(self.vocab_size, self.mask_index + 1)
+      
     self.parameterization = self.config.parameterization
     if self.config.backbone == 'dit':
       self.backbone = models.dit.DIT(
@@ -983,7 +985,7 @@ class Diffusion(L.LightningModule):
       index=x0[:, :, None]).squeeze(-1)
     
     if self.change_of_variables or self.importance_sampling:
-      loss_per_token = log_p_theta * torch.log1p(- torch.exp(- self.noise.sigma_min)) # shape
+      loss_per_token = log_p_theta * torch.log1p(- torch.exp(- self.noise.sigma_min)) # shape (batch_size, seq_len)
     else:
       loss_per_token = - log_p_theta * (dsigma / torch.expm1(sigma))[:, None]
 

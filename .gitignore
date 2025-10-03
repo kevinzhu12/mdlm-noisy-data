@@ -61,6 +61,7 @@ Thumbs.db
 
 # Data and Cache Directories (LARGE FILES)
 data_cache/
+data_cache2/
 data/
 datasets/
 cache/
